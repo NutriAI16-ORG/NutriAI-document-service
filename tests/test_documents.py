@@ -326,8 +326,13 @@ class TestDocumentServiceLayer:
 
     def test_local_storage_operations(self):
         from app.services import upload_document, get_document_url, delete_document_blob
+        from unittest.mock import mock_open
         
-        with patch("app.services.settings.AZURE_STORAGE_CONNECTION_STRING", ""):
+        with patch("app.services.settings.AZURE_STORAGE_CONNECTION_STRING", ""), \
+             patch("os.makedirs"), \
+             patch("builtins.open", mock_open()), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.remove"):
             # Test local mock mode upload
             res = upload_document(b"dummy content", "doc.pdf", "application/pdf")
             assert "blob_name" in res
@@ -432,9 +437,15 @@ class TestDocumentServiceLayer:
 
     def test_get_openai_client_exceptions(self):
         from app.routes import get_openai_client
+        orig_import = __import__
+        def mock_import(name, *args, **kwargs):
+            if name == "openai":
+                raise ImportError("No module named openai")
+            return orig_import(name, *args, **kwargs)
+
         with patch("app.routes.settings.AZURE_OPENAI_KEY", "dummy-key"), \
              patch("app.routes.settings.AZURE_OPENAI_ENDPOINT", "https://dummy-endpoint"), \
-             patch("openai.AzureOpenAI", side_effect=ImportError("No module named openai")):
+             patch("builtins.__import__", side_effect=mock_import):
             assert get_openai_client() is None
 
 
