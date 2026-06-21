@@ -3,6 +3,7 @@ Document Service - API Routes
 """
 
 import logging
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -140,12 +141,13 @@ def process_document_ocr(document_id: str, blob_name: str):
         not ocr_key or ocr_key == "" or ocr_key.startswith("<")
     )
 
+    doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
     if is_mock:
         logger.warning(f"Running OCR background task in MOCK mode for document: {document_id}")
         import time
         time.sleep(2) # Simulate processing delay
         try:
-            document = db.query(Document).filter(Document.id == document_id).first()
+            document = db.query(Document).filter(Document.id == doc_uuid).first()
             if document:
                 filename_lower = document.original_filename.lower()
                 if any(w in filename_lower for w in ["receipt", "invoice", "recipe", "dog", "cat", "sample", "photo", "book"]):
@@ -237,7 +239,7 @@ def process_document_ocr(document_id: str, blob_name: str):
         logger.info(f"OCR completed for {document_id}: {len(extracted_text)} characters extracted")
 
         # Update document record
-        document = db.query(Document).filter(Document.id == document_id).first()
+        document = db.query(Document).filter(Document.id == doc_uuid).first()
         if document:
             validation = validate_document_with_ai(extracted_text, document.original_filename)
             if validation["is_valid"]:
@@ -253,7 +255,7 @@ def process_document_ocr(document_id: str, blob_name: str):
     except (AzureError, OSError, SQLAlchemyError, ValueError) as e:
         logger.error(f"Error processing document {document_id}: {e}")
         try:
-            document = db.query(Document).filter(Document.id == document_id).first()
+            document = db.query(Document).filter(Document.id == doc_uuid).first()
             if document:
                 document.ocr_status = "failed"
                 db.commit()
@@ -265,9 +267,13 @@ def process_document_ocr(document_id: str, blob_name: str):
 
 @router.get("/list")
 async def list_documents(request: Request, db: Session = Depends(get_db)):
-    user_id = request.headers.get("X-User-ID")
-    if not user_id:
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
 
     documents = (
         db.query(Document)
@@ -298,9 +304,13 @@ async def upload_doc(
     document_type: str = Form("other"),
     db: Session = Depends(get_db),
 ):
-    user_id = request.headers.get("X-User-ID")
-    if not user_id:
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
 
     file_extension = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if file_extension not in ALLOWED_EXTENSIONS:
@@ -357,9 +367,17 @@ async def document_status(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    user_id = request.headers.get("X-User-ID")
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user_id = uuid.UUID(user_id_str)
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+
     document = db.query(Document).filter(
-        Document.id == document_id,
+        Document.id == doc_uuid,
         Document.user_id == user_id,
     ).first()
 
@@ -375,9 +393,17 @@ async def document_preview(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    user_id = request.headers.get("X-User-ID")
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user_id = uuid.UUID(user_id_str)
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+
     document = db.query(Document).filter(
-        Document.id == document_id,
+        Document.id == doc_uuid,
         Document.user_id == user_id,
     ).first()
 
@@ -398,9 +424,17 @@ async def delete_doc(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    user_id = request.headers.get("X-User-ID")
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        user_id = uuid.UUID(user_id_str)
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+
     document = db.query(Document).filter(
-        Document.id == document_id,
+        Document.id == doc_uuid,
         Document.user_id == user_id,
     ).first()
 
