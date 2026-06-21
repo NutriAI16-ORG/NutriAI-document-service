@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions, ContentSettings
+from azure.core.exceptions import AzureError
 
 from app.config import get_settings
 
@@ -36,7 +37,7 @@ def upload_document(file_content: bytes, original_filename: str, content_type: s
                 f.write(file_content)
             logger.info(f"Saved mock upload file to: {filepath}")
             return {"blob_name": blob_name, "blob_url": f"/mock-uploads/{blob_name}"}
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Error saving mock file locally: {e}")
             raise
 
@@ -48,7 +49,7 @@ def upload_document(file_content: bytes, original_filename: str, content_type: s
         try:
             container_client.create_container()
             logger.info(f"Created Azure Storage container: '{settings.AZURE_STORAGE_CONTAINER_NAME}'")
-        except Exception as ex:
+        except AzureError as ex:
             # If the container already exists, Azure returns ContainerAlreadyExists which we can safely ignore
             if "ContainerAlreadyExists" not in str(ex):
                 logger.debug(f"Container check/creation details: {ex}")
@@ -65,7 +66,7 @@ def upload_document(file_content: bytes, original_filename: str, content_type: s
 
         return {"blob_name": blob_name, "blob_url": blob_client.url}
 
-    except Exception as e:
+    except (AzureError, OSError) as e:
         logger.error(f"Error uploading document to Azure Storage: {e}")
         raise
 
@@ -93,7 +94,7 @@ def get_document_url(blob_name: str) -> str:
 
         return f"https://{account_name}.blob.core.windows.net/{settings.AZURE_STORAGE_CONTAINER_NAME}/{blob_name}?{sas_token}"
 
-    except Exception as e:
+    except (AzureError, OSError, ValueError) as e:
         logger.error(f"Error generating SAS URL for blob {blob_name}: {e}")
         raise
 
@@ -108,7 +109,7 @@ def delete_document_blob(blob_name: str) -> bool:
             try:
                 os.remove(filepath)
                 logger.info(f"Deleted mock upload file: {filepath}")
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"Could not delete local mock file {filepath}: {e}")
         return True
 
@@ -118,6 +119,6 @@ def delete_document_blob(blob_name: str) -> bool:
         blob_client = container_client.get_blob_client(blob_name)
         blob_client.delete_blob()
         return True
-    except Exception as e:
+    except (AzureError, OSError) as e:
         logger.error(f"Error deleting document from Azure Storage: {e}")
         raise

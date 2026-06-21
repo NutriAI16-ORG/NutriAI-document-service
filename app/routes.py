@@ -7,6 +7,8 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from azure.core.exceptions import AzureError
 
 from app.config import get_settings
 from app.database import get_db
@@ -32,7 +34,7 @@ def get_openai_client():
             api_key=settings.AZURE_OPENAI_KEY,
             api_version=settings.AZURE_OPENAI_API_VERSION,
         )
-    except Exception as e:
+    except (ValueError, OSError, ImportError) as e:
         logger.error(f"Failed to create OpenAI client: {e}")
         return None
 
@@ -117,7 +119,7 @@ def validate_document_with_ai(ocr_content: str, original_filename: str) -> dict:
                 "document_type": result.get("document_type"),
                 "error_message": result.get("error_message", "")
             }
-    except Exception as e:
+    except (ValueError, OSError, RuntimeError) as e:
         logger.error(f"AI document validation error: {e}. Falling back to rule-based validation.")
         
     return fallback_validate_document(ocr_content, original_filename)
@@ -181,7 +183,7 @@ def process_document_ocr(document_id: str, blob_name: str):
                 db.commit()
                 logger.info(f"Mock OCR and validation completed for document {document_id}")
             return
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error saving mock OCR result: {e}")
             db.rollback()
             return
@@ -248,14 +250,14 @@ def process_document_ocr(document_id: str, blob_name: str):
                 document.document_type = "other"
             db.commit()
 
-    except Exception as e:
+    except (AzureError, OSError, SQLAlchemyError, ValueError) as e:
         logger.error(f"Error processing document {document_id}: {e}")
         try:
             document = db.query(Document).filter(Document.id == document_id).first()
             if document:
                 document.ocr_status = "failed"
                 db.commit()
-        except Exception:
+        except SQLAlchemyError:
             db.rollback()
     finally:
         db.close()
@@ -344,7 +346,7 @@ async def upload_doc(
             "status": document.ocr_status,
         })
 
-    except Exception as e:
+    except (AzureError, SQLAlchemyError, OSError) as e:
         logger.error(f"Error uploading document: {e}")
         return JSONResponse(status_code=500, content={"error": "Failed to upload document."})
 
@@ -385,7 +387,7 @@ async def document_preview(
     try:
         sas_url = get_document_url(document.blob_name)
         return JSONResponse(content={"preview_url": sas_url})
-    except Exception as e:
+    except (AzureError, OSError, ValueError) as e:
         logger.error(f"Error generating preview URL: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate preview URL.")
 
@@ -408,14 +410,14 @@ async def delete_doc(
     try:
         try:
             delete_document_blob(document.blob_name)
-        except Exception as e:
+        except (AzureError, OSError) as e:
             logger.warning(f"Could not delete blob {document.blob_name}: {e}")
 
         db.delete(document)
         db.commit()
         return JSONResponse(content={"message": "Document deleted successfully."})
 
-    except Exception as e:
+    except (AzureError, SQLAlchemyError, OSError) as e:
         logger.error(f"Error deleting document: {e}")
         db.rollback()
         return JSONResponse(status_code=500, content={"error": "Failed to delete document."})
