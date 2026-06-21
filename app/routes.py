@@ -19,6 +19,8 @@ settings = get_settings()
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 DOCUMENT_NOT_FOUND = "Document not found."
+NOT_AUTHENTICATED = "Not authenticated"
+INVALID_ID_FORMAT = "Invalid format for user ID or document ID"
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -124,117 +126,146 @@ def validate_document_with_ai(ocr_content: str, original_filename: str) -> dict:
     return fallback_validate_document(ocr_content, original_filename)
 
 
-def _process_mock_ocr(db, doc_uuid, document_id):
+def _update_document_ocr(db, doc_uuid, extracted_text, original_filename):
+    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    if not document:
+        return
+    validation = validate_document_with_ai(extracted_text, original_filename)
+    if validation["is_valid"]:
+        document.ocr_content = extracted_text
+        document.ocr_status = "completed"
+        document.document_type = validation["document_type"]
+    else:
+        document.ocr_content = validation["error_message"]
+        document.ocr_status = "failed"
+        document.document_type = "other"
+    db.commit()
+
+
+def _run_mock_ocr(db, doc_uuid, document_id) -> str:
     logger.warning(f"Running OCR background task in MOCK mode for document: {document_id}")
     import time
     time.sleep(2) # Simulate processing delay
-    try:
-        document = db.query(Document).filter(Document.id == doc_uuid).first()
-        if document:
-            filename_lower = document.original_filename.lower()
-            if any(w in filename_lower for w in ["receipt", "invoice", "recipe", "dog", "cat", "sample", "photo", "book"]):
-                extracted_text = (
-                    "Walmart Supercenter Receipt\n"
-                    "Transaction: 9283401923\n"
-                    "1. Organic Bananas - $1.99\n"
-                    "2. Whole Milk Gallon - $3.49\n"
-                    "3. Dog Food Kibbles - $12.99\n"
-                    "Total: $18.47\n"
-                    "Thank you for shopping!"
-                )
-            else:
-                extracted_text = (
-                    "Lab Report Analysis (Local Mock Mode)\n\n"
-                    "Patient Health Metrics Summary:\n"
-                    "- Heart Rate: 72 bpm (Normal)\n"
-                    "- Blood Pressure: 120/80 mmHg (Optimal)\n"
-                    "- Blood Sugar: 95 mg/dL (Normal)\n"
-                    "- Cholesterol: 185 mg/dL (Desirable)\n"
-                    "- Hemoglobin: 14.5 g/dL (Normal)\n"
-                    "- Vitamin D: 32 ng/mL (Sufficient)\n"
-                )
-
-            validation = validate_document_with_ai(extracted_text, document.original_filename)
-            if validation["is_valid"]:
-                document.ocr_content = extracted_text
-                document.ocr_status = "completed"
-                document.document_type = validation["document_type"]
-            else:
-                document.ocr_content = validation["error_message"]
-                document.ocr_status = "failed"
-                document.document_type = "other"
-
-            db.commit()
-            logger.info(f"Mock OCR and validation completed for document {document_id}")
-    except SQLAlchemyError as e:
-        logger.error(f"Error saving mock OCR result: {e}")
-        db.rollback()
-    finally:
-        db.close()
+    document = db.query(Document).filter(Document.id == doc_uuid).first()
+    if not document:
+        return ""
+    filename_lower = document.original_filename.lower()
+    if any(w in filename_lower for w in ["receipt", "invoice", "recipe", "dog", "cat", "sample", "photo", "book"]):
+        return (
+            "Walmart Supercenter Receipt\n"
+            "Transaction: 9283401923\n"
+            "1. Organic Bananas - $1.99\n"
+            "2. Whole Milk Gallon - $3.49\n"
+            "3. Dog Food Kibbles - $12.99\n"
+            "Total: $18.47\n"
+            "Thank you for shopping!"
+        )
+    return (
+        "Lab Report Analysis (Local Mock Mode)\n\n"
+        "Patient Health Metrics Summary:\n"
+        "- Heart Rate: 72 bpm (Normal)\n"
+        "- Blood Pressure: 120/80 mmHg (Optimal)\n"
+        "- Blood Sugar: 95 mg/dL (Normal)\n"
+        "- Cholesterol: 185 mg/dL (Desirable)\n"
+        "- Hemoglobin: 14.5 g/dL (Normal)\n"
+        "- Vitamin D: 32 ng/mL (Sufficient)\n"
+    )
 
 
-def _process_live_ocr(db, doc_uuid, document_id, blob_name):
+def _extract_text_from_pages(pages) -> str:
+    extracted_text = ""
+    for page in pages:
+        for line in page.lines:
+            extracted_text += line.content + "\n"
+        extracted_text += "\n"
+    return extracted_text
+
+
+def _process_table_cells(cells) -> str:
+    current_row = -1
+    row_data = []
+    extracted_text = ""
+    for cell in cells:
+        if cell.row_index != current_row:
+            if row_data:
+                extracted_text += " | ".join(row_data) + "\n"
+            row_data = []
+            current_row = cell.row_index
+        row_data.append(cell.content)
+    if row_data:
+        extracted_text += " | ".join(row_data) + "\n"
+    return extracted_text
+
+
+def _extract_text_from_tables(tables) -> str:
+    if not tables:
+        return ""
+    extracted_text = "\n--- Tables ---\n"
+    for table_idx, table in enumerate(tables):
+        extracted_text += f"\nTable {table_idx + 1}:\n"
+        extracted_text += _process_table_cells(table.cells)
+    return extracted_text
+
+
+def _parse_ocr_result(result) -> str:
+    text_content = _extract_text_from_pages(result.pages)
+    table_content = _extract_text_from_tables(result.tables)
+    return (text_content + table_content).strip()
+
+
+def _run_live_ocr(blob_name: str) -> str:
     from azure.ai.formrecognizer import DocumentAnalysisClient
     from azure.core.credentials import AzureKeyCredential
 
+    # Download blob
+    from app.services import get_blob_service_client
+    blob_service_client = get_blob_service_client()
+    container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
+    blob_client = container_client.get_blob_client(blob_name)
+    download_stream = blob_client.download_blob()
+    document_content = download_stream.readall()
+    logger.info(f"Downloaded blob {blob_name}: {len(document_content)} bytes")
+
+    # Run OCR
+    client = DocumentAnalysisClient(
+        endpoint=settings.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT,
+        credential=AzureKeyCredential(settings.AZURE_DOCUMENT_INTELLIGENCE_KEY),
+    )
+    poller = client.begin_analyze_document(model_id="prebuilt-read", document=document_content)
+    result = poller.result()
+
+    return _parse_ocr_result(result)
+
+
+def process_document_ocr(document_id: str, blob_name: str):
+    """
+    Background task: download blob, run OCR, update database.
+    """
+    from app.database import SessionLocal
+    db = SessionLocal()
+    doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
+
     try:
-        # Download blob
-        from app.services import get_blob_service_client
-        blob_service_client = get_blob_service_client()
-        container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
-        blob_client = container_client.get_blob_client(blob_name)
-        download_stream = blob_client.download_blob()
-        document_content = download_stream.readall()
-        logger.info(f"Downloaded blob {blob_name}: {len(document_content)} bytes")
-
-        # Run OCR
-        client = DocumentAnalysisClient(
-            endpoint=settings.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT,
-            credential=AzureKeyCredential(settings.AZURE_DOCUMENT_INTELLIGENCE_KEY),
+        # Check if we should run in mock mode
+        conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
+        ocr_key = settings.AZURE_DOCUMENT_INTELLIGENCE_KEY
+        is_mock = (
+            not conn_str or conn_str == "" or "base64" in conn_str or "your-" in conn_str or conn_str.startswith("<") or
+            not ocr_key or ocr_key == "" or ocr_key.startswith("<")
         )
-        poller = client.begin_analyze_document(model_id="prebuilt-read", document=document_content)
-        result = poller.result()
 
-        extracted_text = ""
-        for page in result.pages:
-            for line in page.lines:
-                extracted_text += line.content + "\n"
-            extracted_text += "\n"
+        if is_mock:
+            extracted_text = _run_mock_ocr(db, doc_uuid, document_id)
+        else:
+            extracted_text = _run_live_ocr(blob_name)
 
-        if result.tables:
-            extracted_text += "\n--- Tables ---\n"
-            for table_idx, table in enumerate(result.tables):
-                extracted_text += f"\nTable {table_idx + 1}:\n"
-                current_row = -1
-                row_data = []
-                for cell in table.cells:
-                    if cell.row_index != current_row:
-                        if row_data:
-                            extracted_text += " | ".join(row_data) + "\n"
-                        row_data = []
-                        current_row = cell.row_index
-                    row_data.append(cell.content)
-                if row_data:
-                    extracted_text += " | ".join(row_data) + "\n"
+        if extracted_text is not None:
+            document = db.query(Document).filter(Document.id == doc_uuid).first()
+            if document:
+                _update_document_ocr(db, doc_uuid, extracted_text, document.original_filename)
+                logger.info(f"OCR and validation completed for document {document_id}")
 
-        extracted_text = extracted_text.strip()
-        logger.info(f"OCR completed for {document_id}: {len(extracted_text)} characters extracted")
-
-        # Update document record
-        document = db.query(Document).filter(Document.id == doc_uuid).first()
-        if document:
-            validation = validate_document_with_ai(extracted_text, document.original_filename)
-            if validation["is_valid"]:
-                document.ocr_content = extracted_text
-                document.ocr_status = "completed"
-                document.document_type = validation["document_type"]
-            else:
-                document.ocr_content = validation["error_message"]
-                document.ocr_status = "failed"
-                document.document_type = "other"
-            db.commit()
-
-    except (AzureError, OSError, SQLAlchemyError, ValueError) as e:
+    except Exception as e:
         logger.error(f"Error processing document {document_id}: {e}")
         try:
             document = db.query(Document).filter(Document.id == doc_uuid).first()
@@ -247,39 +278,17 @@ def _process_live_ocr(db, doc_uuid, document_id, blob_name):
         db.close()
 
 
-def process_document_ocr(document_id: str, blob_name: str):
-    """
-    Background task: download blob, run OCR, update database.
-    """
-    from app.database import SessionLocal
-    db = SessionLocal()
-
-    # Check if we should run in mock mode
-    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
-    ocr_key = settings.AZURE_DOCUMENT_INTELLIGENCE_KEY
-    is_mock = (
-        not conn_str or conn_str == "" or "base64" in conn_str or "your-" in conn_str or conn_str.startswith("<") or
-        not ocr_key or ocr_key == "" or ocr_key.startswith("<")
-    )
-
-    doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
-    if is_mock:
-        _process_mock_ocr(db, doc_uuid, document_id)
-    else:
-        _process_live_ocr(db, doc_uuid, document_id, blob_name)
-
-
 @router.get(
     "/list",
     responses={
         400: {"description": "Invalid user ID format"},
-        401: {"description": "Not authenticated"},
+        401: {"description": NOT_AUTHENTICATED},
     }
 )
 async def list_documents(request: Request, db: Annotated[Session, Depends(get_db)]):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     try:
         user_id = uuid.UUID(user_id_str)
     except ValueError:
@@ -310,7 +319,7 @@ async def list_documents(request: Request, db: Annotated[Session, Depends(get_db
     "/upload",
     responses={
         400: {"description": "Invalid file format, file too large, or empty file"},
-        401: {"description": "Not authenticated"},
+        401: {"description": NOT_AUTHENTICATED},
         500: {"description": "Failed to upload document"},
     }
 )
@@ -323,7 +332,7 @@ async def upload_doc(
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     try:
         user_id = uuid.UUID(user_id_str)
     except ValueError:
@@ -381,8 +390,8 @@ async def upload_doc(
 @router.get(
     "/{document_id}/status",
     responses={
-        400: {"description": "Invalid format for user ID or document ID"},
-        401: {"description": "Not authenticated"},
+        400: {"description": INVALID_ID_FORMAT},
+        401: {"description": NOT_AUTHENTICATED},
         404: {"description": "Document not found"},
     }
 )
@@ -393,12 +402,12 @@ async def document_status(
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     try:
         user_id = uuid.UUID(user_id_str)
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
@@ -414,8 +423,8 @@ async def document_status(
 @router.get(
     "/{document_id}/preview",
     responses={
-        400: {"description": "Invalid format for user ID or document ID"},
-        401: {"description": "Not authenticated"},
+        400: {"description": INVALID_ID_FORMAT},
+        401: {"description": NOT_AUTHENTICATED},
         404: {"description": "Document not found"},
         500: {"description": "Failed to generate preview URL"},
     }
@@ -427,12 +436,12 @@ async def document_preview(
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     try:
         user_id = uuid.UUID(user_id_str)
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
@@ -453,8 +462,8 @@ async def document_preview(
 @router.delete(
     "/{document_id}",
     responses={
-        400: {"description": "Invalid format for user ID or document ID"},
-        401: {"description": "Not authenticated"},
+        400: {"description": INVALID_ID_FORMAT},
+        401: {"description": NOT_AUTHENTICATED},
         404: {"description": "Document not found"},
         500: {"description": "Failed to delete document"},
     }
@@ -466,12 +475,12 @@ async def delete_doc(
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
     try:
         user_id = uuid.UUID(user_id_str)
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid format for user ID or document ID")
+        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
