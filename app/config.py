@@ -8,7 +8,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     APP_NAME: str = "NutriAI Document Service"
-    DATABASE_URL: str = "postgresql://nutriai_user@localhost:5432/nutriai"
+    DATABASE_URL: str = "sqlite:///./test.db"
 
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_STORAGE_CONTAINER_NAME: str = "health-documents"
