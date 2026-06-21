@@ -25,6 +25,28 @@ ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
+def get_authenticated_user_id(request: Request) -> uuid.UUID:
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
+    try:
+        return uuid.UUID(user_id_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+
+
+def get_authenticated_user_and_doc_id(request: Request, document_id: str) -> tuple[uuid.UUID, uuid.UUID]:
+    user_id_str = request.headers.get("X-User-ID")
+    if not user_id_str:
+        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
+    try:
+        user_id = uuid.UUID(user_id_str)
+        doc_uuid = uuid.UUID(document_id)
+        return user_id, doc_uuid
+    except ValueError:
+        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
+
+
 def get_openai_client():
     if not settings.AZURE_OPENAI_KEY or not settings.AZURE_OPENAI_ENDPOINT:
         return None
@@ -286,13 +308,7 @@ def process_document_ocr(document_id: str, blob_name: str):
     }
 )
 async def list_documents(request: Request, db: Annotated[Session, Depends(get_db)]):
-    user_id_str = request.headers.get("X-User-ID")
-    if not user_id_str:
-        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    try:
-        user_id = uuid.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid user ID format")
+    user_id = get_authenticated_user_id(request)
 
     documents = (
         db.query(Document)
@@ -330,13 +346,7 @@ async def upload_doc(
     db: Annotated[Session, Depends(get_db)],
     document_type: Annotated[str, Form()] = "other",
 ):
-    user_id_str = request.headers.get("X-User-ID")
-    if not user_id_str:
-        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    try:
-        user_id = uuid.UUID(user_id_str)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid user ID format")
+    user_id = get_authenticated_user_id(request)
 
     file_extension = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if file_extension not in ALLOWED_EXTENSIONS:
@@ -400,14 +410,7 @@ async def document_status(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
 ):
-    user_id_str = request.headers.get("X-User-ID")
-    if not user_id_str:
-        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    try:
-        user_id = uuid.UUID(user_id_str)
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
+    user_id, doc_uuid = get_authenticated_user_and_doc_id(request, document_id)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
@@ -434,14 +437,7 @@ async def document_preview(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
 ):
-    user_id_str = request.headers.get("X-User-ID")
-    if not user_id_str:
-        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    try:
-        user_id = uuid.UUID(user_id_str)
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
+    user_id, doc_uuid = get_authenticated_user_and_doc_id(request, document_id)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
@@ -473,14 +469,7 @@ async def delete_doc(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
 ):
-    user_id_str = request.headers.get("X-User-ID")
-    if not user_id_str:
-        raise HTTPException(status_code=401, detail=NOT_AUTHENTICATED)
-    try:
-        user_id = uuid.UUID(user_id_str)
-        doc_uuid = uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=INVALID_ID_FORMAT)
+    user_id, doc_uuid = get_authenticated_user_and_doc_id(request, document_id)
 
     document = db.query(Document).filter(
         Document.id == doc_uuid,
