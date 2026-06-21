@@ -35,8 +35,8 @@ class TestDocumentsList:
 class TestDocumentUpload:
     """Tests for document upload functionality."""
 
-    @patch("routes.upload_document")
-    @patch("routes.process_document_ocr")
+    @patch("app.routes.upload_document")
+    @patch("app.routes.process_document_ocr")
     def test_upload_document_success(self, mock_ocr, mock_upload, authenticated_client, db_session, test_user):
         """Upload should succeed with valid PDF file."""
         mock_upload.return_value = {
@@ -98,7 +98,7 @@ class TestDocumentStatus:
 class TestDocumentDeletion:
     """Tests for document deletion."""
 
-    @patch("routes.delete_document_blob")
+    @patch("app.routes.delete_document_blob")
     def test_delete_own_document(self, mock_delete, authenticated_client, db_session, test_user):
         """Users should be able to delete their own documents."""
         mock_delete.return_value = True
