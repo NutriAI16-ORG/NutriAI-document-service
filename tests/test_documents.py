@@ -9,6 +9,45 @@ from unittest.mock import patch, MagicMock
 
 from app.models import Document
 
+
+def _create_document_helper(
+    db_session,
+    user_id,
+    doc_id=None,
+    doc_type="other",
+    filename="test.pdf",
+    blob_name="test-blob.pdf",
+    blob_url="https://storage.blob.core.windows.net/test-blob.pdf",
+    ocr_status="pending",
+    ocr_content=None,
+    uploaded_at=None,
+) -> Document:
+    from datetime import timezone
+    doc = Document(
+        id=doc_id or uuid.uuid4(),
+        user_id=user_id,
+        document_type=doc_type,
+        original_filename=filename,
+        blob_name=blob_name,
+        blob_url=blob_url,
+        ocr_status=ocr_status,
+        ocr_content=ocr_content,
+        uploaded_at=uploaded_at or datetime.now(timezone.utc),
+    )
+    db_session.add(doc)
+    db_session.commit()
+    return doc
+
+
+def _setup_mock_blob_clients(mock_get_blob_client):
+    mock_blob = MagicMock()
+    mock_container = MagicMock()
+    mock_service = MagicMock()
+    mock_service.get_container_client.return_value = mock_container
+    mock_container.get_blob_client.return_value = mock_blob
+    mock_get_blob_client.return_value = mock_service
+    return mock_blob, mock_container, mock_service
+
 def test_health_endpoint(client):
     """Health check endpoint should return 200 and document service identification."""
     response = client.get("/health")
@@ -69,19 +108,14 @@ class TestDocumentStatus:
     def test_document_status_endpoint(self, authenticated_client, db_session, test_user):
         """Status endpoint should return JSON with current OCR status."""
         doc_id = uuid.uuid4()
-        doc = Document(
-            id=doc_id,
+        _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="lab_report",
-            original_filename="test.pdf",
-            blob_name="test-blob.pdf",
-            blob_url="https://storage.blob.core.windows.net/test-blob.pdf",
+            doc_id=doc_id,
+            doc_type="lab_report",
             ocr_status="completed",
             ocr_content="Test OCR content",
-            uploaded_at=datetime.utcnow(),
         )
-        db_session.add(doc)
-        db_session.commit()
 
         response = authenticated_client.get(f"/documents/{doc_id}/status")
         assert response.status_code == 200
@@ -104,18 +138,14 @@ class TestDocumentDeletion:
         mock_delete.return_value = True
 
         doc_id = uuid.uuid4()
-        doc = Document(
-            id=doc_id,
+        _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="other",
-            original_filename="to_delete.pdf",
+            doc_id=doc_id,
+            filename="to_delete.pdf",
             blob_name="delete-blob.pdf",
             blob_url="https://storage.blob.core.windows.net/delete-blob.pdf",
-            ocr_status="pending",
-            uploaded_at=datetime.utcnow(),
         )
-        db_session.add(doc)
-        db_session.commit()
 
         response = authenticated_client.delete(f"/documents/{doc_id}")
         assert response.status_code == 200
@@ -130,18 +160,14 @@ class TestDocumentDeletion:
         """Users should not be able to delete other users' documents."""
         other_user_id = uuid.uuid4()
         doc_id = uuid.uuid4()
-        doc = Document(
-            id=doc_id,
+        _create_document_helper(
+            db_session=db_session,
             user_id=other_user_id,
-            document_type="other",
-            original_filename="not_mine.pdf",
+            doc_id=doc_id,
+            filename="not_mine.pdf",
             blob_name="other-blob.pdf",
             blob_url="https://storage.blob.core.windows.net/other-blob.pdf",
-            ocr_status="pending",
-            uploaded_at=datetime.utcnow(),
         )
-        db_session.add(doc)
-        db_session.commit()
 
         response = authenticated_client.delete(f"/documents/{doc_id}")
         assert response.status_code in [403, 404]
@@ -224,17 +250,13 @@ class TestDocumentServiceLayer:
         from app.routes import process_document_ocr
         mock_validate.return_value = {"is_valid": True, "document_type": "lab_report", "error_message": ""}
         
-        doc = Document(
-            id=uuid.uuid4(),
+        doc = _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="other",
-            original_filename="lab_report.pdf",
+            filename="lab_report.pdf",
             blob_name="lab.pdf",
             blob_url="/mock-uploads/lab.pdf",
-            ocr_status="pending"
         )
-        db_session.add(doc)
-        db_session.commit()
 
         # Set is_mock to True implicitly by having empty connection string
         with patch("app.routes.settings.AZURE_STORAGE_CONNECTION_STRING", ""):
@@ -249,17 +271,13 @@ class TestDocumentServiceLayer:
         from app.routes import process_document_ocr
         mock_validate.return_value = {"is_valid": False, "document_type": "other", "error_message": "Invalid document"}
         
-        doc = Document(
-            id=uuid.uuid4(),
+        doc = _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="other",
-            original_filename="Walmart_receipt.pdf",
+            filename="Walmart_receipt.pdf",
             blob_name="receipt.pdf",
             blob_url="/mock-uploads/receipt.pdf",
-            ocr_status="pending"
         )
-        db_session.add(doc)
-        db_session.commit()
 
         with patch("app.routes.settings.AZURE_STORAGE_CONNECTION_STRING", ""):
             process_document_ocr(str(doc.id), doc.blob_name)
@@ -277,26 +295,15 @@ class TestDocumentServiceLayer:
         from app.routes import process_document_ocr
         mock_validate.return_value = {"is_valid": True, "document_type": "lab_report", "error_message": ""}
         
-        doc = Document(
-            id=uuid.uuid4(),
+        doc = _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="other",
-            original_filename="lab_results.pdf",
+            filename="lab_results.pdf",
             blob_name="results.pdf",
             blob_url="https://test.blob/results.pdf",
-            ocr_status="pending"
         )
-        db_session.add(doc)
-        db_session.commit()
 
-        # Mock download blob stream
-        mock_blob_client = MagicMock()
-        mock_container_client = MagicMock()
-        mock_service_client = MagicMock()
-        
-        mock_service_client.get_container_client.return_value = mock_container_client
-        mock_container_client.get_blob_client.return_value = mock_blob_client
-        mock_get_blob_client.return_value = mock_service_client
+        mock_blob_client, _, _ = _setup_mock_blob_clients(mock_get_blob_client)
         
         mock_stream = MagicMock()
         mock_stream.readall.return_value = b"Some blood sugar results"
@@ -352,13 +359,7 @@ class TestDocumentServiceLayer:
     def test_live_storage_operations(self, mock_generate_sas, mock_get_blob_client):
         from app.services import upload_document, get_document_url, delete_document_blob
         
-        mock_blob_client = MagicMock()
-        mock_container_client = MagicMock()
-        mock_service_client = MagicMock()
-        
-        mock_service_client.get_container_client.return_value = mock_container_client
-        mock_container_client.get_blob_client.return_value = mock_blob_client
-        mock_get_blob_client.return_value = mock_service_client
+        _, _, mock_service_client = _setup_mock_blob_clients(mock_get_blob_client)
         
         # Test upload
         res = upload_document(b"content", "doc.pdf", "application/pdf")
@@ -381,13 +382,7 @@ class TestDocumentServiceLayer:
         from app.services import upload_document, get_document_url, delete_document_blob
         from azure.core.exceptions import AzureError
 
-        mock_blob_client = MagicMock()
-        mock_container_client = MagicMock()
-        mock_service_client = MagicMock()
-        
-        mock_service_client.get_container_client.return_value = mock_container_client
-        mock_container_client.get_blob_client.return_value = mock_blob_client
-        mock_get_blob_client.return_value = mock_service_client
+        mock_blob_client, mock_container_client, mock_service_client = _setup_mock_blob_clients(mock_get_blob_client)
 
         # 1. ContainerAlreadyExists handled
         mock_container_client.create_container.side_effect = AzureError("ContainerAlreadyExists")
@@ -534,17 +529,16 @@ class TestRoutesAdditionalCoverage:
         assert response.status_code == 404
 
         # Document found but SAS fails
-        doc = Document(
-            id=doc_uuid,
+        doc = _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="prescription",
-            original_filename="pres.pdf",
+            doc_id=doc_uuid,
+            doc_type="prescription",
+            filename="pres.pdf",
             blob_name="pres.pdf",
             blob_url="/uploads/pres.pdf",
-            ocr_status="completed"
+            ocr_status="completed",
         )
-        db_session.add(doc)
-        db_session.commit()
 
         with patch("app.routes.get_document_url", side_effect=ValueError("SAS Error")):
             response = authenticated_client.get(
@@ -561,17 +555,16 @@ class TestRoutesAdditionalCoverage:
 
         # Delete database error during commit
         doc_uuid = uuid.uuid4()
-        doc = Document(
-            id=doc_uuid,
+        _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="prescription",
-            original_filename="pres.pdf",
+            doc_id=doc_uuid,
+            doc_type="prescription",
+            filename="pres.pdf",
             blob_name="pres.pdf",
             blob_url="/uploads/pres.pdf",
-            ocr_status="completed"
+            ocr_status="completed",
         )
-        db_session.add(doc)
-        db_session.commit()
 
         from sqlalchemy.exc import SQLAlchemyError
         with patch("app.routes.delete_document_blob"), \
@@ -588,17 +581,14 @@ class TestRoutesAdditionalCoverage:
         from sqlalchemy.exc import SQLAlchemyError
         
         doc_uuid = uuid.uuid4()
-        doc = Document(
-            id=doc_uuid,
+        doc = _create_document_helper(
+            db_session=db_session,
             user_id=test_user.id,
-            document_type="other",
-            original_filename="lab_report.pdf",
+            doc_id=doc_uuid,
+            filename="lab_report.pdf",
             blob_name="lab.pdf",
             blob_url="/mock-uploads/lab.pdf",
-            ocr_status="pending"
         )
-        db_session.add(doc)
-        db_session.commit()
 
         # Mock the session inside process_document_ocr to fail on commit
         mock_session = MagicMock()
