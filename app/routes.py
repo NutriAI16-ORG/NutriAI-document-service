@@ -1,9 +1,6 @@
-"""
-Document Service - API Routes
-"""
-
 import logging
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -21,6 +18,7 @@ settings = get_settings()
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
+DOCUMENT_NOT_FOUND = "Document not found."
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -126,72 +124,56 @@ def validate_document_with_ai(ocr_content: str, original_filename: str) -> dict:
     return fallback_validate_document(ocr_content, original_filename)
 
 
-def process_document_ocr(document_id: str, blob_name: str):
-    """
-    Background task: download blob, run OCR, update database.
-    """
-    from app.database import SessionLocal
-    db = SessionLocal()
+def _process_mock_ocr(db, doc_uuid, document_id):
+    logger.warning(f"Running OCR background task in MOCK mode for document: {document_id}")
+    import time
+    time.sleep(2) # Simulate processing delay
+    try:
+        document = db.query(Document).filter(Document.id == doc_uuid).first()
+        if document:
+            filename_lower = document.original_filename.lower()
+            if any(w in filename_lower for w in ["receipt", "invoice", "recipe", "dog", "cat", "sample", "photo", "book"]):
+                extracted_text = (
+                    "Walmart Supercenter Receipt\n"
+                    "Transaction: 9283401923\n"
+                    "1. Organic Bananas - $1.99\n"
+                    "2. Whole Milk Gallon - $3.49\n"
+                    "3. Dog Food Kibbles - $12.99\n"
+                    "Total: $18.47\n"
+                    "Thank you for shopping!"
+                )
+            else:
+                extracted_text = (
+                    "Lab Report Analysis (Local Mock Mode)\n\n"
+                    "Patient Health Metrics Summary:\n"
+                    "- Heart Rate: 72 bpm (Normal)\n"
+                    "- Blood Pressure: 120/80 mmHg (Optimal)\n"
+                    "- Blood Sugar: 95 mg/dL (Normal)\n"
+                    "- Cholesterol: 185 mg/dL (Desirable)\n"
+                    "- Hemoglobin: 14.5 g/dL (Normal)\n"
+                    "- Vitamin D: 32 ng/mL (Sufficient)\n"
+                )
 
-    # Check if we should run in mock mode
-    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
-    ocr_key = settings.AZURE_DOCUMENT_INTELLIGENCE_KEY
-    is_mock = (
-        not conn_str or conn_str == "" or "base64" in conn_str or "your-" in conn_str or conn_str.startswith("<") or
-        not ocr_key or ocr_key == "" or ocr_key.startswith("<")
-    )
+            validation = validate_document_with_ai(extracted_text, document.original_filename)
+            if validation["is_valid"]:
+                document.ocr_content = extracted_text
+                document.ocr_status = "completed"
+                document.document_type = validation["document_type"]
+            else:
+                document.ocr_content = validation["error_message"]
+                document.ocr_status = "failed"
+                document.document_type = "other"
 
-    doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
-    if is_mock:
-        logger.warning(f"Running OCR background task in MOCK mode for document: {document_id}")
-        import time
-        time.sleep(2) # Simulate processing delay
-        try:
-            document = db.query(Document).filter(Document.id == doc_uuid).first()
-            if document:
-                filename_lower = document.original_filename.lower()
-                if any(w in filename_lower for w in ["receipt", "invoice", "recipe", "dog", "cat", "sample", "photo", "book"]):
-                    extracted_text = (
-                        "Walmart Supercenter Receipt\n"
-                        "Transaction: 9283401923\n"
-                        "1. Organic Bananas - $1.99\n"
-                        "2. Whole Milk Gallon - $3.49\n"
-                        "3. Dog Food Kibbles - $12.99\n"
-                        "Total: $18.47\n"
-                        "Thank you for shopping!"
-                    )
-                else:
-                    extracted_text = (
-                        "Lab Report Analysis (Local Mock Mode)\n\n"
-                        "Patient Health Metrics Summary:\n"
-                        "- Heart Rate: 72 bpm (Normal)\n"
-                        "- Blood Pressure: 120/80 mmHg (Optimal)\n"
-                        "- Blood Sugar: 95 mg/dL (Normal)\n"
-                        "- Cholesterol: 185 mg/dL (Desirable)\n"
-                        "- Hemoglobin: 14.5 g/dL (Normal)\n"
-                        "- Vitamin D: 32 ng/mL (Sufficient)\n"
-                    )
+            db.commit()
+            logger.info(f"Mock OCR and validation completed for document {document_id}")
+    except SQLAlchemyError as e:
+        logger.error(f"Error saving mock OCR result: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
-                validation = validate_document_with_ai(extracted_text, document.original_filename)
-                if validation["is_valid"]:
-                    document.ocr_content = extracted_text
-                    document.ocr_status = "completed"
-                    document.document_type = validation["document_type"]
-                else:
-                    document.ocr_content = validation["error_message"]
-                    document.ocr_status = "failed"
-                    document.document_type = "other"
 
-                db.commit()
-                logger.info(f"Mock OCR and validation completed for document {document_id}")
-            return
-        except SQLAlchemyError as e:
-            logger.error(f"Error saving mock OCR result: {e}")
-            db.rollback()
-            return
-        finally:
-            db.close()
-
+def _process_live_ocr(db, doc_uuid, document_id, blob_name):
     from azure.ai.formrecognizer import DocumentAnalysisClient
     from azure.core.credentials import AzureKeyCredential
 
@@ -265,8 +247,36 @@ def process_document_ocr(document_id: str, blob_name: str):
         db.close()
 
 
-@router.get("/list")
-async def list_documents(request: Request, db: Session = Depends(get_db)):
+def process_document_ocr(document_id: str, blob_name: str):
+    """
+    Background task: download blob, run OCR, update database.
+    """
+    from app.database import SessionLocal
+    db = SessionLocal()
+
+    # Check if we should run in mock mode
+    conn_str = settings.AZURE_STORAGE_CONNECTION_STRING
+    ocr_key = settings.AZURE_DOCUMENT_INTELLIGENCE_KEY
+    is_mock = (
+        not conn_str or conn_str == "" or "base64" in conn_str or "your-" in conn_str or conn_str.startswith("<") or
+        not ocr_key or ocr_key == "" or ocr_key.startswith("<")
+    )
+
+    doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
+    if is_mock:
+        _process_mock_ocr(db, doc_uuid, document_id)
+    else:
+        _process_live_ocr(db, doc_uuid, document_id, blob_name)
+
+
+@router.get(
+    "/list",
+    responses={
+        400: {"description": "Invalid user ID format"},
+        401: {"description": "Not authenticated"},
+    }
+)
+async def list_documents(request: Request, db: Annotated[Session, Depends(get_db)]):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -296,13 +306,20 @@ async def list_documents(request: Request, db: Session = Depends(get_db)):
     ]
 
 
-@router.post("/upload")
+@router.post(
+    "/upload",
+    responses={
+        400: {"description": "Invalid file format, file too large, or empty file"},
+        401: {"description": "Not authenticated"},
+        500: {"description": "Failed to upload document"},
+    }
+)
 async def upload_doc(
     request: Request,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    document_type: str = Form("other"),
-    db: Session = Depends(get_db),
+    file: Annotated[UploadFile, File(...)],
+    db: Annotated[Session, Depends(get_db)],
+    document_type: Annotated[str, Form()] = "other",
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
@@ -361,11 +378,18 @@ async def upload_doc(
         return JSONResponse(status_code=500, content={"error": "Failed to upload document."})
 
 
-@router.get("/{document_id}/status")
+@router.get(
+    "/{document_id}/status",
+    responses={
+        400: {"description": "Invalid format for user ID or document ID"},
+        401: {"description": "Not authenticated"},
+        404: {"description": "Document not found"},
+    }
+)
 async def document_status(
     document_id: str,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
@@ -382,16 +406,24 @@ async def document_status(
     ).first()
 
     if not document:
-        return JSONResponse(status_code=404, content={"error": "Document not found."})
+        return JSONResponse(status_code=404, content={"error": DOCUMENT_NOT_FOUND})
 
     return {"id": str(document.id), "ocr_status": document.ocr_status}
 
 
-@router.get("/{document_id}/preview")
+@router.get(
+    "/{document_id}/preview",
+    responses={
+        400: {"description": "Invalid format for user ID or document ID"},
+        401: {"description": "Not authenticated"},
+        404: {"description": "Document not found"},
+        500: {"description": "Failed to generate preview URL"},
+    }
+)
 async def document_preview(
     document_id: str,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
@@ -408,7 +440,7 @@ async def document_preview(
     ).first()
 
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
+        raise HTTPException(status_code=404, detail=DOCUMENT_NOT_FOUND)
 
     try:
         sas_url = get_document_url(document.blob_name)
@@ -418,11 +450,19 @@ async def document_preview(
         raise HTTPException(status_code=500, detail="Failed to generate preview URL.")
 
 
-@router.delete("/{document_id}")
+@router.delete(
+    "/{document_id}",
+    responses={
+        400: {"description": "Invalid format for user ID or document ID"},
+        401: {"description": "Not authenticated"},
+        404: {"description": "Document not found"},
+        500: {"description": "Failed to delete document"},
+    }
+)
 async def delete_doc(
     document_id: str,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id_str = request.headers.get("X-User-ID")
     if not user_id_str:
@@ -439,7 +479,7 @@ async def delete_doc(
     ).first()
 
     if not document:
-        return JSONResponse(status_code=404, content={"error": "Document not found."})
+        return JSONResponse(status_code=404, content={"error": DOCUMENT_NOT_FOUND})
 
     try:
         try:
@@ -460,7 +500,12 @@ async def delete_doc(
 from fastapi.responses import FileResponse
 import os
 
-@router.get("/mock-uploads/{filename}")
+@router.get(
+    "/mock-uploads/{filename}",
+    responses={
+        404: {"description": "Mock file not found"},
+    }
+)
 async def serve_mock_upload(filename: str):
     filepath = os.path.join("/app/uploads", filename)
     if not os.path.exists(filepath):

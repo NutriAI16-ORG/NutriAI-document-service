@@ -83,13 +83,14 @@ def get_document_url(blob_name: str) -> str:
         account_name = blob_service_client.account_name
         account_key = blob_service_client.credential.account_key
 
+        from datetime import timezone
         sas_token = generate_blob_sas(
             account_name=account_name,
             container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
             blob_name=blob_name,
             account_key=account_key,
             permission=BlobSasPermissions(read=True),
-            expiry=datetime.utcnow() + timedelta(hours=1),
+            expiry=datetime.now(timezone.utc) + timedelta(hours=1),
         )
 
         return f"https://{account_name}.blob.core.windows.net/{settings.AZURE_STORAGE_CONTAINER_NAME}/{blob_name}?{sas_token}"
@@ -109,9 +110,11 @@ def delete_document_blob(blob_name: str) -> bool:
             try:
                 os.remove(filepath)
                 logger.info(f"Deleted mock upload file: {filepath}")
+                return True
             except OSError as e:
                 logger.warning(f"Could not delete local mock file {filepath}: {e}")
-        return True
+                return True
+        return False
 
     try:
         blob_service_client = get_blob_service_client()
