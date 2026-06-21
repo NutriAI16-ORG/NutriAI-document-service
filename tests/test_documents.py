@@ -7,7 +7,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-from models import Document
+from app.models import Document
 
 def test_health_endpoint(client):
     """Health check endpoint should return 200 and document service identification."""
@@ -151,7 +151,7 @@ class TestDocumentValidation:
     """Tests for AI and fallback document validation logic."""
 
     def test_fallback_validation_lab_report(self):
-        from routes import fallback_validate_document
+        from app.routes import fallback_validate_document
         res = fallback_validate_document(
             ocr_content="Patient blood test results showing cholesterol levels",
             filename="blood_test.pdf"
@@ -161,7 +161,7 @@ class TestDocumentValidation:
         assert res["error_message"] == ""
 
     def test_fallback_validation_prescription(self):
-        from routes import fallback_validate_document
+        from app.routes import fallback_validate_document
         res = fallback_validate_document(
             ocr_content="Rx: take 1 tablet of Metformin 500mg daily",
             filename="prescription.png"
@@ -171,7 +171,7 @@ class TestDocumentValidation:
         assert res["error_message"] == ""
 
     def test_fallback_validation_invalid_document(self):
-        from routes import fallback_validate_document
+        from app.routes import fallback_validate_document
         res = fallback_validate_document(
             ocr_content="Walmart receipt total amount $23.50",
             filename="receipt.jpg"

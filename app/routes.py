@@ -8,10 +8,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request, UploadFile, Fi
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from config import get_settings
-from database import get_db
-from models import Document
-from services import upload_document, get_document_url, delete_document_blob
+from app.config import get_settings
+from app.database import get_db
+from app.models import Document
+from app.services import upload_document, get_document_url, delete_document_blob
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -127,7 +127,7 @@ def process_document_ocr(document_id: str, blob_name: str):
     """
     Background task: download blob, run OCR, update database.
     """
-    from database import SessionLocal
+    from app.database import SessionLocal
     db = SessionLocal()
 
     # Check if we should run in mock mode
@@ -193,7 +193,7 @@ def process_document_ocr(document_id: str, blob_name: str):
 
     try:
         # Download blob
-        from services import get_blob_service_client
+        from app.services import get_blob_service_client
         blob_service_client = get_blob_service_client()
         container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(blob_name)

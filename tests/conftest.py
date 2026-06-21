@@ -18,9 +18,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from database import Base, get_db
-from main import app
-from models import Document
+from app.database import Base, get_db
+from app.main import app
+from app.models import Document
 
 TEST_DATABASE_URL = "sqlite:///./test.db"
 engine = create_engine(

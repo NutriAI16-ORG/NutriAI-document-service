@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Enum
 from sqlalchemy.dialects.postgresql import UUID
 
-from database import Base
+from app.database import Base
 
 
 class Document(Base):
