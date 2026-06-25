@@ -142,7 +142,7 @@ def validate_document_with_ai(ocr_content: str, original_filename: str) -> dict:
                 "document_type": result.get("document_type"),
                 "error_message": result.get("error_message", "")
             }
-    except (ValueError, OSError, RuntimeError) as e:
+    except Exception as e:
         logger.error(f"AI document validation error: {e}. Falling back to rule-based validation.")
         
     return fallback_validate_document(ocr_content, original_filename)
@@ -307,7 +307,7 @@ def process_document_ocr(document_id: str, blob_name: str):
         401: {"description": NOT_AUTHENTICATED},
     }
 )
-async def list_documents(request: Request, db: Annotated[Session, Depends(get_db)]):
+def list_documents(request: Request, db: Annotated[Session, Depends(get_db)]):
     user_id = get_authenticated_user_id(request)
 
     documents = (
@@ -339,7 +339,7 @@ async def list_documents(request: Request, db: Annotated[Session, Depends(get_db
         500: {"description": "Failed to upload document"},
     }
 )
-async def upload_doc(
+def upload_doc(
     request: Request,
     background_tasks: BackgroundTasks,
     file: Annotated[UploadFile, File(...)],
@@ -355,7 +355,7 @@ async def upload_doc(
             content={"error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"},
         )
 
-    file_content = await file.read()
+    file_content = file.file.read()
     if len(file_content) > MAX_FILE_SIZE:
         return JSONResponse(status_code=400, content={"error": "File size exceeds 10MB limit."})
 
@@ -405,7 +405,7 @@ async def upload_doc(
         404: {"description": "Document not found"},
     }
 )
-async def document_status(
+def document_status(
     document_id: str,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
@@ -432,7 +432,7 @@ async def document_status(
         500: {"description": "Failed to generate preview URL"},
     }
 )
-async def document_preview(
+def document_preview(
     document_id: str,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
@@ -464,7 +464,7 @@ async def document_preview(
         500: {"description": "Failed to delete document"},
     }
 )
-async def delete_doc(
+def delete_doc(
     document_id: str,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
@@ -504,7 +504,7 @@ import os
         404: {"description": "Mock file not found"},
     }
 )
-async def serve_mock_upload(filename: str):
+def serve_mock_upload(filename: str):
     filepath = os.path.join("/app/uploads", filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Mock file not found.")
